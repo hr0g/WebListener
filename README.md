@@ -2,6 +2,7 @@
 Windows C++ program to Listen the HTTP/HTTPS traffic.
 Firefox was recommanded to set proxy as 127.0.0.1 on port 8080 to listen
 ![image](https://github.com/user-attachments/assets/f485ab83-5dcd-4462-84e3-de76283bff80)
+![image](https://github.com/user-attachments/assets/4700ddb8-80e5-479e-a6ba-d2b5e407aab2)
 
 <code>git clone https://github.com/Microsoft/vcpkg.git</code>
 

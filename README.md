@@ -7,14 +7,18 @@ Firefox was recommanded to set proxy as 127.0.0.1 on port 8080 to listen
 
 <code>cd vcpkg</code>
 
-<code>.\vcpkg integrate install</code>
+<code>./vcpkg integrate install</code>
 
-<code>.\bootstrap-vcpkg.bat</code>
+<code>./bootstrap-vcpkg.bat</code>
 
-<code>.\vcpkg install zlib</code>
+<code>./vcpkg install zlib</code>
 
-<code>.\vcpkg install boost-iostreams</code>
+<code>./vcpkg install boost-iostreams</code>
 
-<code>.\vcpkg install boost-system boost-thread</code>
+<code>./vcpkg install boost-system boost-thread</code>
 
-<code>.\vcpkg install openssl:x64-windows</code>
+<code>./vcpkg install openssl:x64-windows</code>
+
+<code>./vcpkg install boost</code>
+
+<code>./vcpkg install boost-beast</code>

@@ -23,3 +23,15 @@ Firefox was recommanded to set proxy as 127.0.0.1 on port 8080 to listen
 <code>./vcpkg install boost</code>
 
 <code>./vcpkg install boost-beast</code>
+
+You also need to add the
+
+<code>path_to_your_vcpkg\installed\x64-windows\include</code>
+
+<code>path_to_your_vcpkg\installed\x64-windows\lib</code>
+
+to your IDE dependency
+
+For example, my path is
+<code>E:\vcpkg-master\installed\x64-windows\include</code>
+<code>E:\vcpkg-master\installed\x64-windows\lib</code>

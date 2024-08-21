@@ -1,13 +1,18 @@
+#pragma warning(disable:4996)
 #include <iostream>
 #include <iomanip>
 #include <cstring>
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <fstream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
 
 #ifdef _WIN32
 #include <openssl/applink.c>
@@ -19,6 +24,46 @@
 
 std::mutex clientSocketsMutex;
 
+bool generateCertificate(const std::string& certFile, const std::string& keyFile) {
+    EVP_PKEY* pKey = EVP_PKEY_new();
+    RSA* rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
+    EVP_PKEY_assign_RSA(pKey, rsa);
+
+    X509* x509 = X509_new();
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+    X509_gmtime_adj(X509_get_notBefore(x509), 0);
+    X509_gmtime_adj(X509_get_notAfter(x509), 31536000L);  // Valid for one year
+    X509_set_pubkey(x509, pKey);
+
+    X509_NAME* name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char*)"US", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (unsigned char*)"MyCompany", -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char*)"localhost", -1, -1, 0);
+    X509_set_issuer_name(x509, name); // Self-signed
+
+    X509_sign(x509, pKey, EVP_sha256());
+
+    FILE* fCert = fopen(certFile.c_str(), "wb");
+    if (fCert == NULL) return false;
+    PEM_write_X509(fCert, x509);
+    fclose(fCert);
+
+    FILE* fKey = fopen(keyFile.c_str(), "wb");
+    if (fKey == NULL) return false;
+    PEM_write_PrivateKey(fKey, pKey, NULL, NULL, 0, NULL, NULL);
+    fclose(fKey);
+
+    EVP_PKEY_free(pKey);
+    X509_free(x509);
+
+    return true;
+}
+
+bool fileExists(const std::string& name) {
+    std::ifstream f(name.c_str());
+    return f.good();
+}
+
 void InitializeSSL() {
     SSL_load_error_strings();
     SSL_library_init();
@@ -27,87 +72,66 @@ void InitializeSSL() {
 
 void CleanupSSL() {
     EVP_cleanup();
+    CRYPTO_cleanup_all_ex_data();
+    ERR_free_strings();
 }
 
-SSL_CTX* CreateContext() {
-    const SSL_METHOD* method = TLS_server_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
+SSL_CTX* CreateContext(const std::string& host) {
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) {
         ERR_print_errors_fp(stderr);
-        exit(1);
+        return nullptr;
     }
+
+    // Support a wider range of SSL/TLS versions
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION);
+
+    // Disable certificate validation for testing (Not recommended for production)
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+
+    std::string certFile = host + ".crt";
+    std::string keyFile = host + ".key";
+
+    // Check if certificate files exist, if not generate them
+    if (!fileExists(certFile) || !fileExists(keyFile)) {
+        if (!generateCertificate(certFile, keyFile)) {
+            std::cerr << "Failed to generate certificate for host: " << host << std::endl;
+            SSL_CTX_free(ctx);
+            return nullptr;
+        }
+    }
+
+    if (SSL_CTX_use_certificate_file(ctx, certFile.c_str(), SSL_FILETYPE_PEM) <= 0 ||
+        SSL_CTX_use_PrivateKey_file(ctx, keyFile.c_str(), SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return nullptr;
+    }
+
     return ctx;
 }
 
-X509* LoadCertificate(const std::string& certPath) {
-    FILE* certFile = fopen(certPath.c_str(), "r");
-    if (!certFile) {
-        std::cerr << "Failed to open certificate file.\n";
-        return nullptr;
-    }
-
-    X509* cert = PEM_read_X509(certFile, nullptr, nullptr, nullptr);
-    fclose(certFile);
-    if (!cert) {
-        std::cerr << "Failed to load certificate.\n";
-    }
-
-    return cert;
-}
-
-EVP_PKEY* LoadPrivateKey(const std::string& keyPath) {
-    FILE* keyFile = fopen(keyPath.c_str(), "r");
-    if (!keyFile) {
-        std::cerr << "Failed to open key file.\n";
-        return nullptr;
-    }
-
-    EVP_PKEY* key = PEM_read_PrivateKey(keyFile, nullptr, nullptr, nullptr);
-    fclose(keyFile);
-    if (!key) {
-        std::cerr << "Failed to load private key.\n";
-    }
-
-    return key;
-}
-
-void ConfigureContext(SSL_CTX* ctx, X509* caCert, EVP_PKEY* caKey) {
-    if (SSL_CTX_use_certificate(ctx, caCert) <= 0) {
-        ERR_print_errors_fp(stderr);
-        exit(1);
-    }
-
-    if (SSL_CTX_use_PrivateKey(ctx, caKey) <= 0) {
-        ERR_print_errors_fp(stderr);
-        exit(1);
-    }
-
-    if (!SSL_CTX_check_private_key(ctx)) {
-        std::cerr << "Private key does not match the public certificate\n";
-        exit(1);
-    }
-}
-
 SOCKET ConnectToServer(const std::string& host, const std::string& port) {
+    struct addrinfo hints = {}, * res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
     SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (serverSocket == INVALID_SOCKET) {
         std::cerr << "Failed to create server socket.\n";
         return INVALID_SOCKET;
     }
 
-    struct addrinfo hints = { 0 }, * res = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
     if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
-        std::cerr << "getaddrinfo failed.\n";
+        std::cerr << "Getaddrinfo failed.\n";
         closesocket(serverSocket);
         return INVALID_SOCKET;
     }
 
     if (connect(serverSocket, res->ai_addr, (int)res->ai_addrlen) == SOCKET_ERROR) {
-        std::cerr << "Connect to destination failed.\n";
+        std::cerr << "Connect to server failed.\n";
         closesocket(serverSocket);
         freeaddrinfo(res);
         return INVALID_SOCKET;
@@ -117,153 +141,121 @@ SOCKET ConnectToServer(const std::string& host, const std::string& port) {
     return serverSocket;
 }
 
-void HandleSSLData(SSL* ssl) {
-    char buffer[4096];
-    int bytesReceived;
-
-    while ((bytesReceived = SSL_read(ssl, buffer, sizeof(buffer))) > 0) {
-        // Process received data
-        std::cout << "Received data:\n";
-        std::cout.write(buffer, bytesReceived);
-        std::cout << std::endl;
-
-        // Send the data to the other end
-        SSL_write(ssl, buffer, bytesReceived);
+SSL_CTX* CreateSSLContext() {
+    const SSL_METHOD* method = TLS_client_method();
+    SSL_CTX* ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
     }
+    return ctx;
+}
 
-    if (bytesReceived < 0) {
-        std::cerr << "SSL_read failed.\n";
-    }
+SSL* CreateSSL(SSL_CTX* ctx, SOCKET socket) {
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, socket);
+    return ssl;
+}
+
+void SendHTTPSRequest(SSL* ssl, const std::string& hostname) {
+    std::string request =
+        "GET / HTTP/1.1\r\n"
+        "Host: " + hostname + "\r\n"
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+
+    SSL_write(ssl, request.c_str(), request.size());
+}
+
+void ReceiveHTTPSResponse(SSL* ssl, SSL* clientSSL) {
+    const int bufferSize = 4096;
+    char buffer[bufferSize];
+    int bytesRead;
+
+    do {
+        bytesRead = SSL_read(ssl, buffer, bufferSize - 1);
+        if (bytesRead > 0) {
+            buffer[bytesRead] = '\0';
+            std::cout << "Response from server: " << std::endl;
+            std::cout << buffer;
+
+            // Forward the response back to the client (browser)
+            SSL_write(clientSSL, buffer, bytesRead);
+        }
+    } while (bytesRead > 0);
 }
 
 void TunnelData(SSL* clientSSL, SSL* serverSSL) {
     std::thread([clientSSL, serverSSL]() {
-        HandleSSLData(clientSSL);
+        char buffer[4096];
+        int bytesRead, bytesWritten;
+        while ((bytesRead = SSL_read(clientSSL, buffer, sizeof(buffer))) > 0) {
+            bytesWritten = SSL_write(serverSSL, buffer, bytesRead);
+            if (bytesWritten <= 0) {
+                ERR_print_errors_fp(stderr);
+                break;
+            }
+        }
         SSL_shutdown(clientSSL);
         SSL_free(clientSSL);
         }).detach();
 
-        HandleSSLData(serverSSL);
+        char buffer[4096];
+        int bytesRead, bytesWritten;
+        while ((bytesRead = SSL_read(serverSSL, buffer, sizeof(buffer))) > 0) {
+            bytesWritten = SSL_write(clientSSL, buffer, bytesRead);
+            if (bytesWritten <= 0) {
+                ERR_print_errors_fp(stderr);
+                break;
+            }
+        }
         SSL_shutdown(serverSSL);
         SSL_free(serverSSL);
-}
-
-void TunnelRawData(SOCKET clientSocket, SOCKET serverSocket) {
-    std::thread([clientSocket, serverSocket]() {
-        char buffer[4096];
-        int bytesReceived;
-
-        while ((bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0)) > 0) {
-            send(serverSocket, buffer, bytesReceived, 0);
-        }
-
-        closesocket(serverSocket);
-        }).detach();
-
-        char buffer[4096];
-        int bytesReceived;
-
-        while ((bytesReceived = recv(serverSocket, buffer, sizeof(buffer), 0)) > 0) {
-            send(clientSocket, buffer, bytesReceived, 0);
-        }
-
-        closesocket(clientSocket);
-}
-
-SOCKET CreateTunnel(SOCKET clientSocket, const std::string& request, SSL_CTX* ctx) {
-    // Parse host and port from CONNECT request
-    std::string host = request.substr(request.find(" ") + 1);
-    host = host.substr(0, host.find(" "));
-    std::string port = "443";  // Default HTTPS port
-
-    if (host.find(":") != std::string::npos) {
-        port = host.substr(host.find(":") + 1);
-        host = host.substr(0, host.find(":"));
-    }
-
-    SOCKET serverSocket = ConnectToServer(host, port);
-    if (serverSocket == INVALID_SOCKET) {
-        return INVALID_SOCKET;
-    }
-
-    // Create SSL objects for client and server
-    SSL* clientSSL = SSL_new(ctx);
-    SSL* serverSSL = SSL_new(ctx);
-
-    SSL_set_fd(clientSSL, clientSocket);
-    SSL_set_fd(serverSSL, serverSocket);
-
-    // Perform SSL handshake
-    if (SSL_accept(clientSSL) <= 0) {
-        std::cerr << "SSL_accept failed.\n";
-        SSL_free(clientSSL);
-        SSL_free(serverSSL);
-        closesocket(serverSocket);
-        return INVALID_SOCKET;
-    }
-
-    if (SSL_connect(serverSSL) <= 0) {
-        std::cerr << "SSL_connect failed.\n";
-        SSL_free(clientSSL);
-        SSL_free(serverSSL);
-        closesocket(serverSocket);
-        return INVALID_SOCKET;
-    }
-
-    return serverSocket;
 }
 
 void ClientHandler(SOCKET clientSocket, SSL_CTX* ctx) {
     char buffer[1024];
     int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
-
     if (bytesReceived > 0) {
         buffer[bytesReceived] = '\0';
-        std::string request(buffer);
+        std::cout << "Received request:\n" << buffer << std::endl;
 
-        std::cout << "Received request:\n" << request << std::endl;
-
-        if (request.find("CONNECT") != std::string::npos) {
-            // Handle HTTPS via CONNECT method
+        if (strstr(buffer, "CONNECT") != nullptr) {
             std::string response = "HTTP/1.1 200 Connection Established\r\n\r\n";
             send(clientSocket, response.c_str(), response.length(), 0);
 
-            // Create SSL objects and tunnel data
-            SOCKET serverSocket = CreateTunnel(clientSocket, request, ctx);
-            if (serverSocket != INVALID_SOCKET) {
-                SSL* clientSSL = SSL_new(ctx);
-                SSL* serverSSL = SSL_new(ctx);
+            SSL* clientSSL = SSL_new(ctx);
+            SSL_set_fd(clientSSL, clientSocket);
 
-                SSL_set_fd(clientSSL, clientSocket);
-                SSL_set_fd(serverSSL, serverSocket);
+            std::string host = "www.baidu.com";
+            std::string port = "443";
+            SOCKET serverSocket = ConnectToServer(host, port);
 
-                TunnelData(clientSSL, serverSSL);
+            SSL_CTX* clientCtx = CreateSSLContext();
+            SSL* serverSSL = CreateSSL(clientCtx, serverSocket);
+
+            if (SSL_accept(clientSSL) <= 0 || SSL_connect(serverSSL) <= 0) {
+                std::cerr << "SSL handshake failed.\n";
+                ERR_print_errors_fp(stderr);
+                SSL_free(clientSSL);
+                SSL_free(serverSSL);
+                SSL_CTX_free(clientCtx);
+                closesocket(serverSocket);
+                closesocket(clientSocket);
+                return;
             }
-            else {
-                std::cerr << "Failed to create tunnel to server.\n";
-            }
+
+            // Monitor traffic and send response back to the browser
+            SendHTTPSRequest(serverSSL, host);
+            ReceiveHTTPSResponse(serverSSL, clientSSL);
+
+            TunnelData(clientSSL, serverSSL);
         }
         else {
-            // Handle normal HTTP request
-            std::string host = "localhost";  // Default to localhost, modify as needed
-            std::string port = "80";  // Default HTTP port
-
-            SOCKET serverSocket = ConnectToServer(host, port);
-            if (serverSocket != INVALID_SOCKET) {
-                send(serverSocket, buffer, bytesReceived, 0);
-
-                // Use TunnelRawData for HTTP connections
-                TunnelRawData(clientSocket, serverSocket);
-            }
-            else {
-                std::cerr << "Failed to connect to HTTP server.\n";
-            }
+            std::cerr << "Received non-CONNECT request.\n";
         }
     }
-    else {
-        std::cerr << "Failed to receive request.\n";
-    }
-
     closesocket(clientSocket);
 }
 
@@ -275,57 +267,45 @@ int main() {
     }
 
     InitializeSSL();
-    SSL_CTX* ctx = CreateContext();
-    X509* caCert = LoadCertificate("server.crt");
-    EVP_PKEY* caKey = LoadPrivateKey("server.key");
-    if (caCert && caKey) {
-        ConfigureContext(ctx, caCert, caKey);
-    }
-    else {
-        std::cerr << "Failed to load CA certificate or private key.\n";
+
+    SSL_CTX* ctx = CreateContext("localhost");
+    if (!ctx) {
+        std::cerr << "SSL context creation failed.\n";
         return 1;
     }
 
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (serverSocket == INVALID_SOCKET) {
-        std::cerr << "Failed to create socket\n";
-        WSACleanup();
+        std::cerr << "Failed to create server socket.\n";
         return 1;
     }
 
-    sockaddr_in serverAddr = { 0 };
+    sockaddr_in serverAddr = {};
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serverAddr.sin_port = htons(8080);  // Listen on port 8080
+    serverAddr.sin_port = htons(8080);
 
-    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed\n";
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR ||
+        listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
+        std::cerr << "Network setup failed.\n";
         closesocket(serverSocket);
-        WSACleanup();
-        return 1;
-    }
-
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
-        std::cerr << "Listen failed\n";
-        closesocket(serverSocket);
-        WSACleanup();
         return 1;
     }
 
     std::cout << "Server listening on port 8080...\n";
-
     while (true) {
         SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
         if (clientSocket == INVALID_SOCKET) {
-            std::cerr << "Accept failed\n";
+            std::cerr << "Accept failed.\n";
             continue;
         }
-
         std::thread(ClientHandler, clientSocket, ctx).detach();
     }
 
     closesocket(serverSocket);
+    SSL_CTX_free(ctx);
     CleanupSSL();
     WSACleanup();
+
     return 0;
 }

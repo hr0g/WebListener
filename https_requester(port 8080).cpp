@@ -117,13 +117,13 @@ int main() {
     const char* hostname = "127.0.0.1";
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(8443);
+    server_addr.sin_port = htons(8080);
 
     addrinfo hints{}, * result;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (getaddrinfo(hostname, "8443", &hints, &result) != 0) { // 直接指定端口号为 8443
+    if (getaddrinfo(hostname, "8080", &hints, &result) != 0) { // 直接指定端口号为 8080
         cerr << "DNS解析失败" << endl;
         closesocket(sock);
         return 1;

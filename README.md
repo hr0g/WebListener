@@ -76,19 +76,27 @@ openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -node
 3. Configure manual proxy:
    ```
    HTTP Proxy: 127.0.0.1:8080
-   HTTPS Proxy: 127.0.0.1:8443
+   HTTPS Proxy: 127.0.0.1:8080    
+   SOCK PROXY: 127.0.0.1:8080
    ```
 
 ![Firefox Proxy Settings](https://github.com/user-attachments/assets/4700ddb8-80e5-479e-a6ba-d2b5e407aab2)
 
-## 🖥️ Usage
 
-```cpp
-// Sample usage code
-ProxyServer server;
-server.start(8080);  // HTTP
-server.startSecure(8443, "cert.pem", "key.pem"); // HTTPS
-```
+## 🖥️ usage method
+
+### Quick Start
+
+1. Clone the repository and build the project
+
+2. Run in the root directory of the project:
+
+### Start using default port
+
+https_proxy(port 8080).exe
+https_server(port 8080).exe
+https_requester(port 8080).exe
+
 
 ## 📊 Traffic Analysis
 ![HTTPS Inspection](https://github.com/user-attachments/assets/0ef8487e-fa41-4577-88e9-e36899cbe6a1)
